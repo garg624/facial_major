@@ -6,7 +6,12 @@ import os
 from datetime import datetime
 import threading
 import time
-from typing import List, Tuple, Optional
+import json
+import pandas as pd
+from typing import List, Tuple, Optional, Dict
+import tempfile
+from pathlib import Path
+import pickle
 
 # Initialize global variables
 path = 'Images'
@@ -16,6 +21,58 @@ encodeListKnown = []
 exit_flag = False
 frame_skip = 2
 frame_count = 0
+ATTENDANCE_FILE = 'Attendance.csv'
+ENCODINGS_FILE = 'face_encodings.pkl'
+
+# Ensure attendance file exists with headers
+if not os.path.exists(ATTENDANCE_FILE):
+    with open(ATTENDANCE_FILE, 'w') as f:
+        f.write("Name,Time,Date\n")
+
+# Save encodings to file
+def save_encodings(encodings, names):
+    try:
+        with open(ENCODINGS_FILE, 'wb') as f:
+            pickle.dump((encodings, names), f)
+        print("Encodings saved successfully")
+    except Exception as e:
+        print(f"Error saving encodings: {str(e)}")
+
+# Load encodings from file
+def load_encodings():
+    try:
+        if os.path.exists(ENCODINGS_FILE):
+            with open(ENCODINGS_FILE, 'rb') as f:
+                encodings, names = pickle.load(f)
+            print("Encodings loaded successfully")
+            return encodings, names
+    except Exception as e:
+        print(f"Error loading encodings: {str(e)}")
+    return None, None
+
+# Check if encodings need to be updated
+def check_encodings_update():
+    try:
+        if not os.path.exists(ENCODINGS_FILE):
+            return True
+            
+        # Get list of current image files
+        current_images = set(os.listdir(path))
+        
+        # Load existing encodings
+        encodings, names = load_encodings()
+        if encodings is None:
+            return True
+            
+        # Check if any images were added or removed
+        saved_names = set(names)
+        if current_images != saved_names:
+            return True
+            
+        return False
+    except Exception as e:
+        print(f"Error checking encodings: {str(e)}")
+        return True
 
 # Load images
 def load_images():
@@ -63,34 +120,95 @@ def findEncodings(images):
     
     return encodeList
 
+# Initialize the system with optimized encoding loading
+def initialize_system():
+    global encodeListKnown, classNames
+    
+    # Check if we need to update encodings
+    if check_encodings_update():
+        print("Generating new encodings...")
+        load_images()
+        encodeListKnown = findEncodings(images)
+        save_encodings(encodeListKnown, classNames)
+    else:
+        print("Loading saved encodings...")
+        encodeListKnown, classNames = load_encodings()
+        if encodeListKnown is None:
+            print("Failed to load encodings, generating new ones...")
+            load_images()
+            encodeListKnown = findEncodings(images)
+            save_encodings(encodeListKnown, classNames)
+    
+    print(f'Encoding Complete. Found {len(encodeListKnown)} encodings.')
+
 # Mark attendance
 def markAttendance(name):
-    with open('Attendance.csv', 'a+') as f:
-        f.seek(0)
-        nameList = [line.split(',')[0] for line in f.readlines() if line.strip()]
-        
-        time_now = datetime.now()
-        current_date = time_now.strftime("%d/%m/%Y")
-        current_time = time_now.strftime("%H:%M:%S")
-        
-        name_date_exists = False
-        for line in f.readlines():
-            if line.strip():
-                parts = line.split(',')
-                if len(parts) >= 3 and parts[0] == name and parts[2].strip() == current_date:
-                    name_date_exists = True
-                    break
-        
-        if name not in nameList or not name_date_exists:
-            f.write(f'\n{name},{current_time},{current_date}')
-            print(f"Marked attendance for {name}")
-            return True
-    return False
+    try:
+        with open(ATTENDANCE_FILE, 'a+') as f:
+            f.seek(0)
+            nameList = [line.split(',')[0] for line in f.readlines() if line.strip()]
+            
+            time_now = datetime.now()
+            current_date = time_now.strftime("%d/%m/%Y")
+            current_time = time_now.strftime("%H:%M:%S")
+            
+            name_date_exists = False
+            for line in f.readlines():
+                if line.strip():
+                    parts = line.split(',')
+                    if len(parts) >= 3 and parts[0] == name and parts[2].strip() == current_date:
+                        name_date_exists = True
+                        break
+            
+            if name not in nameList or not name_date_exists:
+                f.write(f'\n{name},{current_time},{current_date}')
+                print(f"Marked attendance for {name}")
+                return True
+        return False
+    except Exception as e:
+        print(f"Error marking attendance: {str(e)}")
+        return False
+
+# Get attendance records
+def get_attendance_records() -> pd.DataFrame:
+    try:
+        df = pd.read_csv(ATTENDANCE_FILE)
+        return df
+    except Exception as e:
+        print(f"Error reading attendance records: {str(e)}")
+        return pd.DataFrame(columns=["Name", "Time", "Date"])
+
+# Export attendance to CSV
+def export_to_csv():
+    try:
+        df = get_attendance_records()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"attendance_export_{timestamp}.csv"
+        df.to_csv(filename, index=False)
+        return f"Exported to {filename}"
+    except Exception as e:
+        return f"Error exporting to CSV: {str(e)}"
+
+# Export attendance to JSON
+def export_to_json():
+    try:
+        df = get_attendance_records()
+        records = df.to_dict(orient='records')
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"attendance_export_{timestamp}.json"
+        with open(filename, 'w') as f:
+            json.dump(records, f, indent=4)
+        return f"Exported to {filename}"
+    except Exception as e:
+        return f"Error exporting to JSON: {str(e)}"
 
 # Process image function
 def process_image(img: np.ndarray) -> Tuple[np.ndarray, List[str], str]:
     global frame_count
     try:
+        if img is None:
+            return None, [], "No image provided"
+            
         # Resize image for faster processing
         imgS = cv2.resize(img, (0, 0), None, 0.25, 0.25)
         imgS = cv2.cvtColor(imgS, cv2.COLOR_BGR2RGB)
@@ -145,29 +263,138 @@ def process_image(img: np.ndarray) -> Tuple[np.ndarray, List[str], str]:
         
     except Exception as e:
         print(f"Error processing image: {str(e)}")
-        return img, [], "Error processing image"
+        return img, [], f"Error processing image: {str(e)}"
 
 # Initialize the system
-load_images()
-encodeListKnown = findEncodings(images)
-print(f'Encoding Complete. Found {len(encodeListKnown)} encodings.')
+initialize_system()
 
-# Create Gradio interface
-with gr.Blocks(title="Face Recognition Attendance System") as demo:
-    gr.Markdown("# Face Recognition Attendance System")
+# Create Gradio interface with custom theme
+with gr.Blocks(
+    title="Face Recognition Attendance System",
+    theme=gr.themes.Soft(
+        primary_hue="gray",
+        secondary_hue="gray",
+        neutral_hue="gray",
+        text_size="lg",
+        spacing_size="lg",
+        radius_size="lg",
+    )
+) as demo:
+    # Custom CSS for additional styling
+    gr.HTML("""
+    <style>
+        .gradio-container {
+            background: #12263A ;
+            color: #F4F4ED;
+        }
+        .gradio-container .panel {
+            background: #F4F4ED;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .gradio-container .button {
+            background: #646E78 ;
+            color: #F4F4ED;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 5px;
+            transition: all 0.3s ease;
+            font-weight: 500;
+        }
+        .gradio-container .button:hover {
+            background: #7a858f;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+        .gradio-container .textbox {
+            background: #F4F4ED;
+            border: 2px solid #12263A ;
+            border-radius: 5px;
+            color: #12263A ;
+        }
+        .creator-credits {
+            text-align: center;
+            padding: 20px;
+            background: rgba(244, 244, 237, 0.1);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(5px);
+        }
+        .creator-credits h1 {
+            color: #F4F4ED;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        .creator-credits p {
+            color: #F4F4ED;
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        .mobile-notice {
+            display: none;
+            text-align: center;
+            padding: 10px;
+            background: rgba(244, 244, 237, 0.1);
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        @media (max-width: 768px) {
+            .mobile-notice {
+                display: block;
+            }
+            .gradio-container .button {
+                width: 100%;
+                margin: 5px 0;
+            }
+            .gradio-container .panel {
+                padding: 15px;
+            }
+        }
+    </style>
+    """)
+    
+    # Creator credits
+    gr.HTML("""
+    <div class="creator-credits">
+        <h1>Face Recognition Attendance System</h1>
+        <p>Created by Ayush and Soumay</p>
+    </div>
+    """)
+    
+    # Mobile notice
+    gr.HTML("""
+    <div class="mobile-notice">
+        <p>For best experience, use in landscape mode on mobile devices</p>
+    </div>
+    """)
+    
     gr.Markdown("Upload an image or use your webcam to detect faces and mark attendance.")
     
     with gr.Row():
         with gr.Column():
             input_image = gr.Image(label="Input Image", type="numpy")
-            submit_btn = gr.Button("Process Image")
-            live_btn = gr.Button("Start Live Processing")
-            stop_btn = gr.Button("Stop Live Processing")
+            with gr.Row():
+                submit_btn = gr.Button("Process Image", variant="primary")
+                live_btn = gr.Button("Start Live Processing", variant="primary")
+                stop_btn = gr.Button("Stop Live Processing", variant="secondary")
         
         with gr.Column():
             output_image = gr.Image(label="Processed Image", type="numpy")
             output_names = gr.Textbox(label="Recognized Names", lines=2)
             attendance_status = gr.Textbox(label="Attendance Status", lines=2)
+    
+    with gr.Row():
+        with gr.Column():
+            gr.Markdown("## Attendance Records")
+            with gr.Row():
+                view_records_btn = gr.Button("View Attendance Records", variant="primary")
+                export_csv_btn = gr.Button("Export to CSV", variant="primary")
+                export_json_btn = gr.Button("Export to JSON", variant="primary")
+            records_display = gr.Dataframe(label="Attendance Records", headers=["Name", "Time", "Date"])
+            export_status = gr.Textbox(label="Export Status", lines=2)
     
     def process_live():
         cap = cv2.VideoCapture(0)
@@ -190,6 +417,10 @@ with gr.Blocks(title="Face Recognition Attendance System") as demo:
         exit_flag = True
         return None, None, "Processing stopped"
     
+    def view_records():
+        df = get_attendance_records()
+        return df
+    
     submit_btn.click(
         fn=process_image,
         inputs=[input_image],
@@ -209,6 +440,21 @@ with gr.Blocks(title="Face Recognition Attendance System") as demo:
         outputs=[output_image, output_names, attendance_status]
     )
     
+    view_records_btn.click(
+        fn=view_records,
+        outputs=[records_display]
+    )
+    
+    export_csv_btn.click(
+        fn=export_to_csv,
+        outputs=[export_status]
+    )
+    
+    export_json_btn.click(
+        fn=export_to_json,
+        outputs=[export_status]
+    )
+    
     gr.Markdown("## API Usage")
     gr.Markdown("""
     This interface supports API access. You can make POST requests to the endpoint with an image file.
@@ -220,4 +466,10 @@ with gr.Blocks(title="Face Recognition Attendance System") as demo:
     """)
 
 if __name__ == "__main__":
-    demo.launch(share=True) 
+    # Launch with share=True to get a public URL
+    demo.launch(
+        share=True,
+        server_name="0.0.0.0",
+        server_port=7860,
+        show_error=True
+    ) 
